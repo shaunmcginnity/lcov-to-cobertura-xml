@@ -5,13 +5,16 @@
 # This is free software, licensed under the Apache License, Version 2.0,
 # available in the accompanying LICENSE.txt file.
 
+# Shaun 
+
 """
 Converts lcov line coverage output to Cobertura-compatible XML for CI
 """
 
-import re, sys, os, time
+import re, sys, os, time, subprocess
 from xml.dom import minidom
 from optparse import OptionParser
+from xml.sax.saxutils import escape
 
 VERSION = '1.4'
 __all__ = ['LcovCobertura']
@@ -73,12 +76,14 @@ class LcovCobertura(object):
         file_lines_covered = 0
         file_lines = {}
         file_methods = {}
+        method_lines = {}
         file_branches_total = 0
         file_branches_covered = 0
 
         for line in self.lcov_data.split('\n'):
             if line.strip() == 'end_of_record':
                 if current_file is not None:
+                    print "Saving data for current file = " + current_file
                     package_dict = coverage_data['packages'][package]
                     package_dict['lines-total'] += file_lines_total
                     package_dict['lines-covered'] += file_lines_covered
@@ -89,12 +94,16 @@ class LcovCobertura(object):
                     file_dict['lines-covered'] = file_lines_covered
                     file_dict['lines'] = dict(file_lines)
                     file_dict['methods'] = dict(file_methods)
+                    file_dict['method_lines'] = dict(method_lines)
                     file_dict['branches-total'] = file_branches_total
                     file_dict['branches-covered'] = file_branches_covered
                     coverage_data['summary']['lines-total'] += file_lines_total
                     coverage_data['summary']['lines-covered'] += file_lines_covered
                     coverage_data['summary']['branches-total'] += file_branches_total
                     coverage_data['summary']['branches-covered'] += file_branches_covered
+                print "Continuing after end_of_record"
+                current_file = None
+                continue
 
             line_parts = line.split(':',1)
             input_type = line_parts[0]
@@ -102,30 +111,40 @@ class LcovCobertura(object):
             if input_type == 'SF':
                 # Get file name
                 file_name = line_parts[-1].strip()
-                relative_file_name = os.path.relpath(file_name, self.base_dir)
-                package = '.'.join(relative_file_name.split(os.path.sep)[0:-1])
+                #relative_file_name = os.path.relpath(file_name, self.base_dir)
                 class_name = file_name.split(os.path.sep)[-1]
-                if package not in coverage_data['packages']:
-                    coverage_data['packages'][package] = {
-                        'classes': {}, 'lines-total': 0, 'lines-covered': 0,
-                        'branches-total': 0, 'branches-covered': 0
+                #print "SF : " + file_name + " " + relative_file_name + " " + package + " " + class_name
+                baseIndex = file_name.find(self.base_dir)
+                if(0 == baseIndex):
+                    base_relative_file = file_name[1 + len(self.base_dir):]
+                    package = '.'.join(base_relative_file.split(os.path.sep)[0:-1])
+                    print "Found package " + file_name + " " + base_relative_file + " " + package
+
+                    if package not in coverage_data['packages']:
+                        coverage_data['packages'][package] = {
+                            'classes': {}, 'lines-total': 0, 'lines-covered': 0,
+                            'branches-total': 0, 'branches-covered': 0
+                        }
+                    coverage_data['packages'][package]['classes'][base_relative_file] = {
+                        'name': class_name, 'lines': {}, 'lines-total': 0,
+                        'lines-covered': 0, 'branches-total': 0,
+                        'branches-covered': 0
                     }
-                coverage_data['packages'][package]['classes'][
-                relative_file_name] = {
-                    'name': class_name, 'lines': {}, 'lines-total': 0,
-                    'lines-covered': 0, 'branches-total': 0,
-                    'branches-covered': 0
-                }
-                package = package
-                current_file = relative_file_name
-                file_lines_total = 0
-                file_lines_covered = 0
-                file_lines.clear()
-                file_methods.clear()
-                file_branches_total = 0
-                file_branches_covered = 0
+                    package = package
+                    current_file = base_relative_file
+                    file_lines_total = 0
+                    file_lines_covered = 0
+                    file_lines.clear()
+                    file_methods.clear()
+                    method_lines.clear()
+                    file_branches_total = 0
+                    file_branches_covered = 0
+                else:
+                    print "Ignoring " + file_name + " as not under source tree"
+
             elif input_type == 'DA':
                 # DA:2,0
+                if current_file is not None: print "Found DA for " + current_file
                 (line_number, line_hits) = line_parts[-1].strip().split(',')
                 line_number = int(line_number)
                 if line_number not in file_lines:
@@ -141,6 +160,7 @@ class LcovCobertura(object):
             elif input_type == 'BRDA':
                 # BRDA:1,1,2,0
                 (line_number, block_number, branch_number, branch_hits) = line_parts[-1].strip().split(',')
+                if current_file is not None: print "Found BRDA for " + current_file + " " + line_number + " " + block_number + " " + branch_number + " " + branch_hits
                 line_number = int(line_number)
                 if line_number not in file_lines:
                     file_lines[line_number] = {
@@ -154,22 +174,38 @@ class LcovCobertura(object):
                     file_lines[line_number]['branches-covered'] += 1
                     file_branches_covered += 1
             elif input_type == 'BRF':
+                if current_file is not None: print "Found BRF for " + current_file
                 file_branches_total = int(line_parts[1])
             elif input_type == 'BRH':
+                if current_file is not None: print "Found BRH for " + current_file
                 file_branches_covered = int(line_parts[1])
             elif input_type == 'FN':
                 # FN:5,(anonymous_1)
-                function_name = line_parts[-1].strip().split(',')[1]
+                (function_line,function_name) = line_parts[-1].strip().split(',')
+                if current_file is not None: print "Found FN for " + current_file + " " + function_name + "@" + function_line
                 file_methods[function_name] = '0'
+                method_lines[function_name] = function_line
             elif input_type == 'FNDA':
+                if current_file is not None: print "Found FNDA for " + current_file
                 # FNDA:0,(anonymous_1)
                 (function_hits, function_name) = line_parts[-1].strip().split(',')
                 file_methods[function_name] = function_hits
+            else:
+                print "Unknown input_type " + input_type
 
         # Exclude packages
+        print self.excludes
+        for x in coverage_data['packages']:
+                    print "Checking if " + x + " matches"
+                    print re.match('.unittest.', x)
+        
         excluded = [x for x in coverage_data['packages'] for e in self.excludes
-                    if re.match(e, x)]
+                    if re.search(e, x)]
+
+        print excluded
+
         for package in excluded:
+            print "Excluding " + package
             del coverage_data['packages'][package]
 
         # Compute line coverage rates
@@ -243,9 +279,18 @@ class LcovCobertura(object):
                 for method_name, hits in list(class_data['methods'].items()):
                     method_el = self._el(document, 'method', {
                         'name': method_name,
-                        'signature' : '',
-                        'hits': hits
+                        'signature' : '()Z',
+                        'line-rate': '0.0',
+                        'branch-rate': '0.0'
                     })
+                    method_lines_el = self._el(document, 'lines', {})
+                    method_el.appendChild(method_lines_el)
+                    method_line_el = self._el(document, 'line', {
+                        'number': class_data['method_lines'][method_name],
+                        'hits': hits,
+                        'branch': 'false'
+                    })
+                    method_lines_el.appendChild(method_line_el)
                     methods_el.appendChild(method_el)
 
                 # Process lines
@@ -345,6 +390,8 @@ if __name__ == '__main__':
         if len(args) != 2:
             print((main.__doc__))
             sys.exit(1)
+
+        print options.excludes
 
         try:
             with open(args[1], 'r') as lcov_file:
